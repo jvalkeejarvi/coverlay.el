@@ -237,6 +237,14 @@
         (when (coverlay-line-coverage-line-p current-line)
           (let ((filestats (assoc filename statslist)))
             (setcdr filestats (cons (list 'LH (coverlay--extract-line-coverage current-line)) (cdr filestats)))))
+        (when (coverlay-branch-count-line-p current-line)
+          (let ((filestats (assoc filename statslist)))
+            (let* ((stats-values (cdr filestats))
+                   (new-values (cons (list 'BRF (coverlay--extract-line-count current-line)) stats-values)))
+              (setcdr filestats new-values))))
+        (when (coverlay-branch-coverage-line-p current-line)
+          (let ((filestats (assoc filename statslist)))
+            (setcdr filestats (cons (list 'BRH (coverlay--extract-line-coverage current-line)) (cdr filestats)))))
         (when (coverlay-data-line-p current-line)
           (let* ((cols (coverlay-extract-data-list current-line))
                  (lineno (nth 0 cols))
@@ -283,6 +291,18 @@
 (defun coverlay-line-coverage-line-p (line)
   "Predicate if LINE contains lcov line coverage data (LH)."
   (coverlay-string-starts-with line "LH:"))
+
+(defun coverlay-branch-count-line-p (line)
+  "Predicate if LINE contains lcov branch count data (BRF)."
+  (coverlay-string-starts-with line "BRF:"))
+
+(defun coverlay-branch-coverage-line-p (line)
+  "Predicate if LINE contains lcov branch coverage data (BRH)."
+  (coverlay-string-starts-with line "BRH:"))
+
+(defun coverlay-line-branch-covered--p (line)
+  "Predicate if LINE contains lcov branch coverage data (BRDA)."
+  (coverlay-string-ends-with line "1"))
 
 (defun coverlay-end-of-record-p (line)
   "Predicate if LINE contains lcov end marker (end_of_record)."
@@ -465,36 +485,46 @@
 
 (defun coverlay--stats-format-percent (lines covered)
   "Format percent string from LINES and COVERED."
-  (format "%d%%" (* 100 (/ (float covered) lines))))
+  (if (eq lines 0)
+      (format "%d%%" 100)
+    (format "%d%%" (floor (* 100 (/ (float covered) lines))))))
 
-(defun coverlay--stats-tabulate-file (file file-lines file-covered)
+(defun coverlay--stats-tabulate-file (file file-lines file-covered branches branches-covered)
   "Tabulate statistics for FILE from FILE-LINES and FILE-COVERED."
   (list file (vector (coverlay--stats-format-percent file-lines file-covered)
                      (format "%d" file-lines)
                      (format "%d" file-covered)
+                     (format "%d" branches)
+                     (format "%d" branches-covered)
                      file)))
 
 (defun coverlay--stats-tabulate-files ()
   "Tabulate statistics on file base."
-  (let* ((lines 0) (covered 0)
+  (let* ((lines 0) (covered 0) (branches 0) (branches-covered 0)
         (file-stats (mapcar (lambda (entry)
                               (let* ((file (car entry))
                                      (data (cdr entry))
                                      (file-lines (cadr (assoc 'LF data)))
-                                     (file-covered (cadr (assoc 'LH data))))
+                                     (file-covered (cadr (assoc 'LH data)))
+                                     (file-branches (cadr (assoc 'BRF data)))
+                                     (file-branches-covered (cadr (assoc 'BRH data))))
                                 (setq lines (+ lines file-lines)
-                                      covered (+ covered file-covered))
-                                (coverlay--stats-tabulate-file file file-lines file-covered)))
+                                      covered (+ covered file-covered)
+                                      branches (+ branches file-branches)
+                                      branches-covered (+ branches-covered file-branches-covered))
+                                (coverlay--stats-tabulate-file file file-lines file-covered file-branches file-branches-covered)))
                             coverlay-stats-alist)))
-    (list lines covered file-stats)))
+    (list lines covered branches branches-covered file-stats)))
 
 (defun coverlay--stats-tabulate ()
   "Tabulate current statistics for major mode display."
   (let* ((file-data (coverlay--stats-tabulate-files))
          (lines (car file-data))
          (covered (cl-second file-data))
-         (file-stats (cl-third file-data)))
-    (append file-stats (list (coverlay--stats-tabulate-file "overall" lines covered)))))
+         (branches (cl-third file-data))
+         (branches-covered (cl-fourth file-data))
+         (file-stats (cl-fifth file-data)))
+    (append file-stats (list (coverlay--stats-tabulate-file "overall" lines covered branches branches-covered)))))
 
 ;; (coverlay--stats-tabulate)
 
@@ -528,6 +558,8 @@
   "Mode for listing statistics of coverlay-mode."
   (setq tabulated-list-format [("%%" 5 coverlay--stats-sort-numeric :right-align t :pad-right 2)
                                ("Lines" 7 coverlay--stats-sort-numeric :right-align t :pad-right 2)
+                               ("Covered" 7 coverlay--stats-sort-numeric :right-align t :pad-right 2)
+                               ("Branches" 7 coverlay--stats-sort-numeric :right-align t :pad-right 2)
                                ("Covered" 7 coverlay--stats-sort-numeric :right-align t :pad-right 2)
                                ("File" 0 coverlay--stats-sort-string)]
         tabulated-list-sort-key (cons "%%" nil)
