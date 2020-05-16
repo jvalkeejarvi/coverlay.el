@@ -96,6 +96,11 @@
   :type 'string
   :group 'coverlay)
 
+(defcustom coverlay:partly-tested-line-background-color "orange4"
+  "background-color for partly tested lines (branch coverage not 100%)."
+  :type 'string
+  :group 'coverlay)
+
 (defcustom coverlay:mark-tested-lines t
   "background-color for tested lines."
   :type 'boolean
@@ -176,13 +181,17 @@
     (goto-char (point-min))
     (let ((lists (coverlay-create-stats-alist-from-current-buffer)))
       (setq coverlay-alist (car lists))
-      (setq coverlay-stats-alist (cadr lists)))
+      (setq coverlay-stats-alist (cadr lists))
+      (setq coverlay-partly-covered-list (car (last lists))))
     (setq coverlay--loaded-filepath filepath)))
 
 (defun coverlay-create-stats-alist-from-current-buffer ()
   "Create the alist from data in current buffer."
-  (let ((lists (coverlay-parse-current-buffer)))
+  (let* ((lists (coverlay-parse-current-buffer))
+        (partly-covered-list (coverlay-tuplize-cdr-of-alist (coverlay-reverse-cdr-of-alist (car (last lists))))))
     (setcar lists (coverlay-tuplize-cdr-of-alist (coverlay-reverse-cdr-of-alist (car lists))))
+    (setq lists (butlast lists))
+    (setq lists (add-to-list 'lists partly-covered-list t))
     lists))
 
 (defun coverlay-reverse-cdr-of-alist (target-alist)
@@ -220,7 +229,7 @@
 
 (defun coverlay-parse-current-buffer ()
   "Parse current buffer to alist.  car of each element is filename, cdr is segment of lines."
-  (let (alist statslist filename)
+  (let (alist partly-covered-list statslist filename)
     (while (not (eobp))
       (let ((current-line (coverlay-current-line)))
         (when (coverlay-source-file-p current-line)
@@ -228,6 +237,7 @@
           (when (not (assoc filename alist))
             ;; (print (format "segments for %s does not exist" filename))
             (setq alist (cons (list filename) alist))
+            (setq partly-covered-list (cons (list filename) partly-covered-list))
             (setq statslist (cons (list filename) statslist))))
         (when (coverlay-line-count-line-p current-line)
           (let ((filestats (assoc filename statslist)))
@@ -251,15 +261,41 @@
                  (count (nth 1 cols)))
             (when (= count 0)
               ;; (print (format "count %d is zero" count))
-              (coverlay--handle-uncovered-line alist filename lineno)))))
+              (coverlay--handle-uncovered-line alist filename lineno))))
+        (when (coverlay-branch-data-line-p current-line)
+          (let* ((cols (coverlay-extract-data-list current-line))
+                 (lineno (nth 0 cols))
+                 (covered (car (last cols))))
+            (when (= covered 0)
+                (coverlay--handle-partly-covered-line partly-covered-list filename lineno)))))
       (forward-line 1))
-    (list alist statslist)))
+    (list alist statslist partly-covered-list)))
 
 (defun coverlay--handle-source-file-line (line)
   "Set current source file from LINE,"
   )
 
 (defun coverlay--handle-uncovered-line (alist filename lineno)
+  "Add uncovered line at LINENO in FILENAME to ALIST."
+  (let* ((file-segments (assoc filename alist))
+         (segment-list-body (cdr file-segments)))
+    (if (not segment-list-body)
+        (setcdr file-segments (list lineno lineno))
+      (if (= (car segment-list-body) (- lineno 1))
+          (setcar segment-list-body lineno)
+        (setcdr file-segments (append (list lineno lineno) segment-list-body))))))
+
+(defun coverlay--handle-partly-covered-line (alist filename lineno)
+  "Add uncovered line at LINENO in FILENAME to ALIST."
+  (let* ((file-segments (assoc filename alist))
+         (segment-list-body (cdr file-segments)))
+    (if (not segment-list-body)
+        (setcdr file-segments (list lineno lineno))
+      (if (= (car segment-list-body) (- lineno 1))
+          (setcar segment-list-body lineno)
+        (setcdr file-segments (append (list lineno lineno) segment-list-body))))))
+
+(defun coverlay--handle-uncovered-line-branch (alist filename lineno)
   "Add uncovered line at LINENO in FILENAME to ALIST."
   (let* ((file-segments (assoc filename alist))
          (segment-list-body (cdr file-segments)))
@@ -300,8 +336,12 @@
   "Predicate if LINE contains lcov branch coverage data (BRH)."
   (coverlay-string-starts-with line "BRH:"))
 
-(defun coverlay-line-branch-covered--p (line)
+(defun coverlay-branch-data-line-p (line)
   "Predicate if LINE contains lcov branch coverage data (BRDA)."
+  (coverlay-string-starts-with line "BRDA:"))
+
+(defun coverlay-line-branch-covered-p (line)
+  "Predicate if branch of LINE is covered"
   (coverlay-string-ends-with line "1"))
 
 (defun coverlay-end-of-record-p (line)
@@ -365,19 +405,23 @@
 
 (defun coverlay-overlay-current-buffer ()
   "Overlay current buffer."
-  (let ((data (coverlay-stats-tuples-for-buffer (current-buffer) coverlay-alist)))
-    (if data
-        (coverlay-overlay-current-buffer-with-data data)
+  (let ((uncovered-lines-data (coverlay-stats-tuples-for-buffer (current-buffer) coverlay-alist))
+        (partly-covered-lines-data (coverlay-stats-tuples-for-buffer (current-buffer) coverlay-partly-covered-list)))
+    (if uncovered-lines-data
+        (coverlay-overlay-current-buffer-with-data uncovered-lines-data partly-covered-lines-data)
       (message (format "coverlay.el: no coverage data for %s in %s"
                        (coverlay--make-rel-filename-from-buffer (current-buffer))
                        coverlay--loaded-filepath)))))
 
-(defun coverlay-overlay-current-buffer-with-data (data)
+(defun coverlay-overlay-current-buffer-with-data (uncovered-lines-data &optional partly-covered-lines-data)
   "Overlay current buffer with DATA."
   (coverlay-clear-cov-overlays)
   (when coverlay:mark-tested-lines
         (coverlay--make-covered-overlay))
-  (coverlay-overlay-current-buffer-with-list data))
+  (when partly-covered-lines-data
+    (coverlay-overlay-current-buffer-with-list partly-covered-lines-data coverlay:partly-tested-line-background-color))
+  (coverlay-overlay-current-buffer-with-list uncovered-lines-data coverlay:untested-line-background-color))
+
 
 (defun coverlay-overlay-exists-p ()
   "Predicate if coverlay overlays exists in current buffer."
@@ -398,12 +442,12 @@
   "Mark all lines in current buffer as covered with overlay."
   (coverlay--overlay-put (make-overlay (point-min) (point-max)) coverlay:tested-line-background-color))
 
-(defun coverlay-overlay-current-buffer-with-list (tuple-list)
+(defun coverlay-overlay-current-buffer-with-list (tuple-list color)
   "Overlay current buffer acording to given TUPLE-LIST."
   (save-excursion
     (goto-char (point-min))
     (dolist (ovl (coverlay-map-overlays tuple-list))
-      (coverlay--overlay-put ovl coverlay:untested-line-background-color))))
+      (coverlay--overlay-put ovl color))))
 
 (defun coverlay--overlay-put (ovl color)
   "Record actual overlay in OVL with COLOR."
